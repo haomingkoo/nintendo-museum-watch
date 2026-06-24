@@ -1,0 +1,1 @@
+# No third-party deps — stdlib only (urllib). This file just tells Railway/Nixpacks "this is Python".
