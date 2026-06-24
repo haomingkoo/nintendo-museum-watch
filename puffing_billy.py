@@ -35,11 +35,17 @@ ADULT_FARE = "2867_2810"   # the "Adult" fare code in the guest-selection step
 
 TOPIC    = os.environ.get("NTFY_TOPIC", "pb-CHANGEME")  # real value lives in .env / Railway vars
 EMAIL    = os.environ.get("ALERT_EMAIL", "").strip()
-DATES    = [d.strip() for d in os.environ.get("DATES", "05/08/2026,06/08/2026,07/08/2026,08/08/2026").split(",") if d.strip()]
+DATES    = [d.strip() for d in os.environ.get("DATES", "06/08/2026,07/08/2026").split(",") if d.strip()]
 PRODUCT  = os.environ.get("PRODUCT", "BEL-LAK")
 ADULTS   = int(os.environ.get("ADULTS", "4"))
 INTERVAL = int(os.environ.get("INTERVAL", "300"))
 RUN_ONCE = os.environ.get("RUN_ONCE") == "1"
+
+
+def _dkey(d):
+    """DD/MM/YYYY -> (yyyy, mm, dd) for correct chronological comparison."""
+    day, mon, year = d.split("/")
+    return (int(year), int(mon), int(day))
 
 
 def _get(url, data=None, cookie=None):
@@ -69,6 +75,10 @@ def scan():
     raw = _get(f"{BASE}&updateAvailability&localtime={ts}",
                data="newDate=06/08/2026&direction=0", cookie=cookie)
     rows = {r["date"]: r for r in json.loads(raw).get("availability", [])}
+    # Highest bookable date = the sales horizon. When it jumps forward, a new
+    # block of dates (e.g. September) has just gone on sale — the moment to grab
+    # 4 fresh seats before they sell out.
+    horizon = max((d for d in rows), key=_dkey, default=None)
 
     out = {}
     for d in DATES:
@@ -81,7 +91,7 @@ def scan():
             prod = next((p for p in r.get("detailedAvailability", []) if p.get("code") == PRODUCT), None)
             out[d] = ("available" if prod and prod.get("available") != "Sold out"
                       else "other" if prod is None else "soldout")
-    return out
+    return out, horizon
 
 
 def _push(msg, headers):
@@ -116,19 +126,35 @@ def alert(open_dates):
         print("  email skipped: set NTFY_TOKEN (free ntfy.sh account) to enable", flush=True)
 
 
+def alert_release(old_horizon, new_horizon):
+    msg = (f"Puffing Billy just released new dates: now bookable through {new_horizon} "
+           f"(was {old_horizon}). September may be open — grab 4 adults before it sells out: {BOOK}")
+    _push(msg, {"Title": "New Puffing Billy dates ON SALE", "Priority": "urgent",
+                "Tags": "steam_locomotive,calendar", "Click": BOOK})
+    print(f"  pushed release alert -> {new_horizon}", flush=True)
+
+
 def main():
     print(f"watching {PRODUCT} for {DATES} | topic={TOPIC} | every {INTERVAL}s", flush=True)
     prev_open = set()
+    horizon = None
     while True:
         try:
-            res = scan()
+            res, new_horizon = scan()
             now_open = {d for d, s in res.items() if s == "available"}
             stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{stamp}] " + "  ".join(f"{d}:{res[d]}" for d in DATES), flush=True)
+            print(f"[{stamp}] horizon={new_horizon}  "
+                  + "  ".join(f"{d}:{res[d]}" for d in DATES), flush=True)
             newly = now_open - prev_open
             if newly:
                 alert(sorted(newly))
             prev_open = now_open
+            # Alert when the sales horizon advances — but stay silent on the first
+            # scan (that's just establishing the baseline, not a real release).
+            if horizon is not None and new_horizon and _dkey(new_horizon) > _dkey(horizon):
+                alert_release(horizon, new_horizon)
+            if new_horizon:
+                horizon = new_horizon
         except Exception as e:
             print(f"[scan error] {e}", flush=True)
         if RUN_ONCE:
@@ -136,5 +162,17 @@ def main():
         time.sleep(INTERVAL)
 
 
+def _selftest():
+    # horizon comparison must be chronological, not string-sorted
+    assert _dkey("06/08/2026") < _dkey("15/08/2026")
+    assert _dkey("31/08/2026") < _dkey("01/09/2026")   # Sept release > end of Aug
+    assert _dkey("09/08/2026") < _dkey("10/08/2026")   # not lexical ("09" vs "10")
+    assert max(["07/08/2026", "31/08/2026", "01/09/2026"], key=_dkey) == "01/09/2026"
+    print("selftest ok")
+
+
 if __name__ == "__main__":
-    main()
+    if os.environ.get("SELFTEST") == "1":
+        _selftest()
+    else:
+        main()

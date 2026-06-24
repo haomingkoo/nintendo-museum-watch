@@ -47,7 +47,14 @@ every 5–10 min (it re-alerts each run while open, since cron runs don't share 
 ## How it works
 GET the booking page → read the `oidToken` it embeds → set the party size
 (`updateBookingFareQty`) → `updateAvailability` → check each watched date for a non-sold-out
-`BEL-LAK` entry. Alerts only on the sold-out→open transition.
+`BEL-LAK` entry. Two alert triggers:
+- **Cancellation** — a watched date flips sold-out → open for the party size.
+- **New release** — the sales horizon (furthest bookable date) jumps forward, i.e. a new
+  block like September just went on sale. This is the best shot at 4 fresh seats, since the
+  whole current window (→ 15 Aug 2026) is sold out for 4. Silent on first scan (baseline only).
+
+> The trestle-bridge ride is **Belgrave→Lakeside** (`BEL-LAK`) — the iconic, always-sold-out
+> one. `BEL-GEM` also crosses it (longer); `LAK-GEM` does not.
 
 ## Not included: auto-hold
 Auto-reserving the seats into a cart was scoped but **not built**: the booking wizard is
