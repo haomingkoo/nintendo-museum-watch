@@ -1,4 +1,8 @@
 .env
+state.json
+log.txt
+launchd.log
+launchd.err
 __pycache__/
 *.pyc
 .playwright-mcp/
