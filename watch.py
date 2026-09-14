@@ -24,6 +24,7 @@ import http.cookiejar
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -159,7 +160,11 @@ def _push_ntfy(title: str, message: str) -> None:
     urllib.request.urlopen(request, timeout=TIMEOUT).read()
 
 
-def _push_mac(title: str, message: str) -> None:
+def _push_mac(title: str, message: str) -> bool:
+    """Desktop banner. No-op anywhere without osascript, e.g. the Railway container."""
+    if not shutil.which("osascript"):
+        return False
+
     def esc(text: str) -> str:
         return text.replace("\\", "\\\\").replace('"', '\\"')
     subprocess.run(
@@ -167,6 +172,7 @@ def _push_mac(title: str, message: str) -> None:
          f'display notification "{esc(message)}" with title "{esc(title)}" '
          f'sound name "Glass"'],
         capture_output=True, check=False)
+    return True
 
 
 def notify(title: str, message: str) -> list[str]:
@@ -180,8 +186,10 @@ def notify(title: str, message: str) -> list[str]:
             results.append(f"ntfy FAILED: {exc}")
     else:
         results.append("ntfy skipped (no NTFY_TOPIC)")
-    _push_mac(title, message)
-    results.append("mac ok")
+    try:
+        results.append("mac ok" if _push_mac(title, message) else "mac skipped (no osascript)")
+    except OSError as exc:
+        results.append(f"mac FAILED: {exc}")
     return results
 
 
@@ -225,15 +233,24 @@ def sweep() -> int:
              + f"  horizon({HORIZON}):{'released' if released else 'unreleased'}"]
     if alerts:
         lines.append("  !!! " + " | ".join(alerts))
-        title = "Nintendo Museum tickets OPEN"
-        lines += [f"  {r}" for r in notify(title, "; ".join(alerts)[:300])]
+
+    # Persist BEFORE notifying. If a notification failure can prevent the state write,
+    # one alert becomes an endless re-alert loop: crash, restart with no state,
+    # re-detect, push again. That is exactly what osascript did on Railway.
+    STATE_FILE.write_text(json.dumps({**states, HORIZON_KEY: released},
+                                     indent=1, sort_keys=True))
+
+    if alerts:
+        try:
+            lines += [f"  {r}" for r in notify("Nintendo Museum tickets OPEN",
+                                               "; ".join(alerts)[:300])]
+        except Exception as exc:  # noqa: BLE001 - a bad channel must not kill the sweep
+            lines.append(f"  notify crashed: {type(exc).__name__}: {exc}")
 
     report = "\n".join(lines)
     print(report, flush=True)
     with LOG_FILE.open("a") as handle:
         handle.write(report + "\n")
-    STATE_FILE.write_text(json.dumps({**states, HORIZON_KEY: released},
-                                     indent=1, sort_keys=True))
     return 10 if alerts else 0
 
 
@@ -266,6 +283,17 @@ def _selftest() -> None:
     assert diff({"2026-11-28": "closed"}, {"2026-11-28": "soldout"}), "closure lifted"
 
     assert months_for(("2026-11-28", "2026-11-30", "2026-12-01")) == [(2026, 11), (2026, 12)]
+
+    # Regression: the Railway container has no osascript. This used to raise
+    # FileNotFoundError mid-notify, skipping the state write, so every restart
+    # re-alerted forever. It must quietly report "not sent" instead.
+    real_which = shutil.which
+    shutil.which = lambda _name: None
+    try:
+        assert _push_mac("title", "msg") is False, "must no-op without osascript"
+    finally:
+        shutil.which = real_which
+
     print("selftest ok")
 
 
